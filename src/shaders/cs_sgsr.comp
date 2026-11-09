@@ -23,7 +23,8 @@ void sgsrPass(uvec2 pos, vec2 invSize)
     if (pos.x >= u_width || pos.y >= u_height)
         return;
     vec4 color = sampleSgsr1(s_samplers[0], (vec2(pos) + 0.5) * invSize);
-    imageStore(dst, ivec2(pos), vec4(color.rgb, 1));
+    // Alpha carries a local edge-protection mask into the RCAS composite pass.
+    imageStore(dst, ivec2(pos), color);
 }
 
 void main()

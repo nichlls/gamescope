@@ -39,6 +39,7 @@ uniform layers_t {
 #define A_GLSL 1
 #include "ffx_a.h"
 #define FSR_RCAS_F 1
+#define FSR_RCAS_PASSTHROUGH_ALPHA 1
 vec4 FsrRcasLoadF(ivec2 p) { return texelFetch(s_samplers[0], ivec2(p), 0); }
 // our input is already srgb
 void FsrRcasInputF(inout float r, inout float g, inout float b) {}
@@ -64,7 +65,12 @@ void rcasComposite(uvec2 pos)
         uvec2 layer0Extent = uvec2(textureSize(s_samplers[0], 0));
 
         if (all(lessThan(rcasPos, layer0Extent))) {
-            FsrRcasF(outputValue.r, outputValue.g, outputValue.b, rcasPos, u_c1.xxxx);
+            float edgeProtection;
+            FsrRcasF(outputValue.r, outputValue.g, outputValue.b, edgeProtection, rcasPos, u_c1.xxxx);
+            if ((u_borderMask & 0x80000000u) != 0u) {
+                vec3 unsharpened = texelFetch(s_samplers[0], ivec2(rcasPos), 0).rgb;
+                outputValue = mix(outputValue, unsharpened, clamp(edgeProtection, 0.0, 1.0));
+            }
 
             uint colorspace = get_layer_colorspace(0);
             if (colorspace == colorspace_linear)

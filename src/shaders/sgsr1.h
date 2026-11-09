@@ -43,14 +43,17 @@ mediump float sgsrFastLanczos2(mediump float x)
 	return wB*wA;
 }
 // Above the reference 0.55 to narrow the kernel, so far taps cannot outvote a lone dark texel.
-const float sgsrKernelWidth = 0.8;
+const float sgsrKernelWidth = 0.65;
+const mediump float sgsrMaxCorrection = 23.0 / 255.0;
 
 // Outlier rejection fades in with tap distance, so the texel covering the pixel always votes.
-mediump float sgsrWeight(mediump float dx, mediump float dy, mediump float g, mediump float std)
+mediump float sgsrWeight(mediump float dx, mediump float dy, mediump float g, mediump float std, mediump vec2 direction)
 {
 	mediump float d2 = (dx*dx)+(dy*dy);
 	mediump float outlier = clamp(abs(g)*std, 0.0, 1.0) * min(d2 * 0.5, 1.0);
-	return sgsrFastLanczos2(d2 * sgsrKernelWidth + outlier);
+	mediump float across = dx * direction.x + dy * direction.y;
+	mediump float directedD2 = d2 + 0.55 * across * across;
+	return sgsrFastLanczos2(directedD2 * sgsrKernelWidth + outlier);
 }
 // Clamped to its own nearest 2x2, so shared weights cannot pull a channel out of range.
 mediump float sgsrChannel(mediump float w[12], mediump vec4 ud, mediump vec4 l, mediump vec4 r, mediump float invSum)
@@ -69,6 +72,7 @@ vec4 sampleSgsr1(sampler2D tex, vec2 uv)
 {
 	const float edgeThreshold = 8.0 / 255.0;
 	mediump vec4 color = textureLod(tex, uv, 0.0);
+	mediump float rcasProtection = 0.0;
 
 	vec2 size = vec2(textureSize(tex, 0));
 	vec4 viewport = vec4(1.0 / size, size);
@@ -78,12 +82,14 @@ vec4 sampleSgsr1(sampler2D tex, vec2 uv)
 		highp vec2 coord = (imgCoordPixel*viewport.xy);
 		mediump vec2 pl = (imgCoord+(-imgCoordPixel));
 		mediump vec4 leftG = textureGather(tex,coord, 1);
-
-		mediump float edgeVote = abs(leftG.z - leftG.y) + abs(color.g - leftG.y)  + abs(color.g - leftG.z) ;
+		mediump vec4 leftR = textureGather(tex,coord,0);
+		mediump vec4 leftB = textureGather(tex,coord,2);
+		mediump vec4 leftY = 0.2126*leftR + 0.7152*leftG + 0.0722*leftB;
+		mediump float colorY = dot(color.rgb, vec3(0.2126, 0.7152, 0.0722));
+		mediump float edgeVote = abs(leftY.z - leftY.y) + abs(colorY - leftY.y) + abs(colorY - leftY.z);
 		if(edgeVote > edgeThreshold)
 		{
-			// Red and blue wait on green's weights so twelve gathers are never live at once.
-			highp vec2 leftCoord = coord;
+			rcasProtection = smoothstep(edgeThreshold * 1.2, edgeThreshold * 3.0, edgeVote);
 			coord.x += viewport.x;
 			highp vec2 rightCoord = coord + vec2(viewport.x, 0.0);
 			highp vec2 upCoord = coord + vec2(0.0, -viewport.y);
@@ -92,48 +98,44 @@ vec4 sampleSgsr1(sampler2D tex, vec2 uv)
 			mediump vec4 upDownG;
 			upDownG.xy = textureGather(tex,upCoord, 1).wz;
 			upDownG.zw = textureGather(tex,downCoord, 1).yx;
+			mediump vec4 rightR = textureGather(tex,rightCoord,0), rightB = textureGather(tex,rightCoord,2);
+			mediump vec4 upDownR, upDownB;
+			upDownR.xy = textureGather(tex,upCoord,0).wz;
+			upDownR.zw = textureGather(tex,downCoord,0).yx;
+			upDownB.xy = textureGather(tex,upCoord,2).wz;
+			upDownB.zw = textureGather(tex,downCoord,2).yx;
 
-			mediump float meanG = sgsrMean(leftG, rightG);
-			leftG -= vec4(meanG); rightG -= vec4(meanG); upDownG -= vec4(meanG);
-
-			mediump float sum = (((((abs(leftG.x)+abs(leftG.y))+abs(leftG.z))+abs(leftG.w))+(((abs(rightG.x)+abs(rightG.y))+abs(rightG.z))+abs(rightG.w)))+(((abs(upDownG.x)+abs(upDownG.y))+abs(upDownG.z))+abs(upDownG.w)));
-			mediump float std = 2.181818/sum;
+			mediump vec4 rightY = 0.2126*rightR + 0.7152*rightG + 0.0722*rightB;
+			mediump vec4 upDownY = 0.2126*upDownR + 0.7152*upDownG + 0.0722*upDownB;
+			mediump float meanY = sgsrMean(leftY, rightY);
+			leftY -= vec4(meanY); rightY -= vec4(meanY); upDownY -= vec4(meanY);
+			mediump vec2 grad = vec2((rightY.x-leftY.z)+(rightY.w-leftY.y), (rightY.x-leftY.z)-(rightY.w-leftY.y));
+			mediump float gradLen = length(grad);
+			mediump vec2 direction = gradLen > 1e-5 ? grad / gradLen : vec2(0.0);
+			mediump float sum = dot(abs(leftY)+abs(rightY)+abs(upDownY),vec4(1.0));
+			mediump float std = 2.181818/max(sum, 1e-5);
 
 			mediump float w[12];
-			w[0]  = sgsrWeight(pl.x,     pl.y+1.0, upDownG.x, std);
-			w[1]  = sgsrWeight(pl.x-1.0, pl.y+1.0, upDownG.y, std);
-			w[2]  = sgsrWeight(pl.x-1.0, pl.y-2.0, upDownG.z, std);
-			w[3]  = sgsrWeight(pl.x,     pl.y-2.0, upDownG.w, std);
-			w[4]  = sgsrWeight(pl.x+1.0, pl.y-1.0, leftG.x, std);
-			w[5]  = sgsrWeight(pl.x,     pl.y-1.0, leftG.y, std);
-			w[6]  = sgsrWeight(pl.x,     pl.y,     leftG.z, std);
-			w[7]  = sgsrWeight(pl.x+1.0, pl.y,     leftG.w, std);
-			w[8]  = sgsrWeight(pl.x-1.0, pl.y-1.0, rightG.x, std);
-			w[9]  = sgsrWeight(pl.x-2.0, pl.y-1.0, rightG.y, std);
-			w[10] = sgsrWeight(pl.x-2.0, pl.y,     rightG.z, std);
-			w[11] = sgsrWeight(pl.x-1.0, pl.y,     rightG.w, std);
-			mediump float invSum = 1.0 / (((w[0]+w[1])+(w[2]+w[3]))+((w[4]+w[5])+(w[6]+w[7]))+((w[8]+w[9])+(w[10]+w[11])));
+			w[0]  = sgsrWeight(pl.x,     pl.y+1.0, upDownY.x, std, direction);
+			w[1]  = sgsrWeight(pl.x-1.0, pl.y+1.0, upDownY.y, std, direction);
+			w[2]  = sgsrWeight(pl.x-1.0, pl.y-2.0, upDownY.z, std, direction);
+			w[3]  = sgsrWeight(pl.x,     pl.y-2.0, upDownY.w, std, direction);
+			w[4]  = sgsrWeight(pl.x+1.0, pl.y-1.0, leftY.x, std, direction);
+			w[5]  = sgsrWeight(pl.x,     pl.y-1.0, leftY.y, std, direction);
+			w[6]  = sgsrWeight(pl.x,     pl.y,     leftY.z, std, direction);
+			w[7]  = sgsrWeight(pl.x+1.0, pl.y,     leftY.w, std, direction);
+			w[8]  = sgsrWeight(pl.x-1.0, pl.y-1.0, rightY.x, std, direction);
+			w[9]  = sgsrWeight(pl.x-2.0, pl.y-1.0, rightY.y, std, direction);
+			w[10] = sgsrWeight(pl.x-2.0, pl.y,     rightY.z, std, direction);
+			w[11] = sgsrWeight(pl.x-1.0, pl.y,     rightY.w, std, direction);
+			mediump float invSum = 1.0 / max((((w[0]+w[1])+(w[2]+w[3]))+((w[4]+w[5])+(w[6]+w[7]))+((w[8]+w[9])+(w[10]+w[11]))), 1e-5);
 
-			// Green is centered on its mean, so its clamp window is centered too.
-			color.g = meanG + sgsrChannel(w, upDownG, leftG, rightG, invSum);
-			{
-				mediump vec4 l = textureGather(tex,leftCoord, 0);
-				mediump vec4 r = textureGather(tex,rightCoord, 0);
-				mediump vec4 ud;
-				ud.xy = textureGather(tex,upCoord, 0).wz;
-				ud.zw = textureGather(tex,downCoord, 0).yx;
-				color.r = sgsrChannel(w, ud, l, r, invSum);
-			}
-			{
-				mediump vec4 l = textureGather(tex,leftCoord, 2);
-				mediump vec4 r = textureGather(tex,rightCoord, 2);
-				mediump vec4 ud;
-				ud.xy = textureGather(tex,upCoord, 2).wz;
-				ud.zw = textureGather(tex,downCoord, 2).yx;
-				color.b = sgsrChannel(w, ud, l, r, invSum);
-			}
+			color.r = clamp(sgsrChannel(w, upDownR, leftR, rightR, invSum), color.r-sgsrMaxCorrection, color.r+sgsrMaxCorrection);
+			color.g = clamp(sgsrChannel(w, upDownG, leftG, rightG, invSum), color.g-sgsrMaxCorrection, color.g+sgsrMaxCorrection);
+			color.b = clamp(sgsrChannel(w, upDownB, leftB, rightB, invSum), color.b-sgsrMaxCorrection, color.b+sgsrMaxCorrection);
 		}
 	}
 
+	color.a = rcasProtection;
 	return color;
 }

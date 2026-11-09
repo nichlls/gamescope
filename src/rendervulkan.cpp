@@ -4099,11 +4099,20 @@ struct RcasPushData_t
 	RcasPushData_t(const struct FrameInfo_t *frameInfo, float sharpness, uint32_t rotation = 0)
 	{
 		uvec4_t tmp;
-		FsrRcasCon(&tmp.x, sharpness);
+		// SGSR sharpness 20 is the visible sharpening-off endpoint. Keep the
+		// shared FSR/RCAS path intact for other filters.
+		if (frameInfo->useSGSRLayer0 && sharpness >= 2.0f)
+			tmp.x = 0;
+		else
+			FsrRcasCon(&tmp.x, sharpness);
 		u_rotation = rotation;
 		u_layer0Offset.x = uint32_t(int32_t(frameInfo->layers.get( 0 ).offset.x));
 		u_layer0Offset.y = uint32_t(int32_t(frameInfo->layers.get( 0 ).offset.y));
 		u_borderMask = frameInfo->borderMask() >> 1u;
+		// The high bit is outside the layer border mask and tags SGSR's alpha
+		// channel as a per-pixel RCAS edge-protection mask.
+		if ( frameInfo->useSGSRLayer0 )
+			u_borderMask |= 0x80000000u;
 		u_frameId = s_frameId++;
 		u_c1 = tmp.x;
 		u_shaderFilter = 0;
