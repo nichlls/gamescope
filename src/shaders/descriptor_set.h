@@ -48,6 +48,9 @@ layout(binding = 1) writeonly uniform image2D dst;
 // alias
 layout(binding = 1) writeonly uniform image2D dst_luma;
 layout(binding = 2) writeonly uniform image2D dst_chroma;
+// Optional third storage image for compute passes that produce several maps.
+// It aliases the first target when no extra target is bound by the host.
+layout(binding = 7) writeonly uniform image2D dst_extra;
 
 layout(binding = 3) uniform sampler2D s_samplers[VKR_SAMPLER_SLOTS];
 layout(binding = 4) uniform sampler2D s_ycbcr_samplers[VKR_SAMPLER_SLOTS];

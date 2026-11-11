@@ -45,6 +45,7 @@ enum class GamescopeUpscaleFilter : uint32_t
     NIS,
     PIXEL,
     SGSR,
+    CLEARSCALE,
 
     FROM_VIEW = 0xF, // internal
 };
@@ -56,6 +57,22 @@ static constexpr bool UpscaleFilterUsesSharpness( GamescopeUpscaleFilter eFilter
            eFilter == GamescopeUpscaleFilter::SGSR;
 }
 
+// v0.1 ClearScale consumes encoded, opaque SDR RGB. Linear/scRGB, PQ and
+// YCbCr inputs are kept on the established Gamescope filter path.
+static constexpr bool ClearScaleSupportsInput( GamescopeAppTextureColorspace eColorspace, bool bYcbcr, bool bHasAlpha = false )
+{
+	return !bYcbcr && !bHasAlpha && eColorspace == GAMESCOPE_APP_TEXTURE_COLORSPACE_SRGB;
+}
+
+static constexpr bool ClearScaleSupportsScale( uint32_t inputWidth, uint32_t inputHeight, uint32_t outputWidth, uint32_t outputHeight )
+{
+    if ( !inputWidth || !inputHeight || !outputWidth || !outputHeight )
+        return false;
+    const float scaleX = float(outputWidth) / float(inputWidth);
+    const float scaleY = float(outputHeight) / float(inputHeight);
+    return scaleX >= 1.1f && scaleX <= 2.0f && scaleY >= 1.1f && scaleY <= 2.0f;
+}
+
 // cs_sgsr reads the plain sampler slot, not the YCbCr one, and thresholds in 8-bit SDR units.
 static constexpr bool SgsrSupportsInput( GamescopeAppTextureColorspace eColorspace, bool bYcbcr )
 {
@@ -63,8 +80,10 @@ static constexpr bool SgsrSupportsInput( GamescopeAppTextureColorspace eColorspa
 }
 
 // Sharp ran FSR before SGSR existed, so HDR keeps that rather than losing the sharpening. Neither pre-pass reads the YCbCr slot.
-static constexpr GamescopeUpscaleFilter ResolveUpscaleFilter( GamescopeUpscaleFilter eFilter, GamescopeAppTextureColorspace eColorspace, bool bYcbcr )
+static constexpr GamescopeUpscaleFilter ResolveUpscaleFilter( GamescopeUpscaleFilter eFilter, GamescopeAppTextureColorspace eColorspace, bool bYcbcr, bool bHasAlpha = false )
 {
+	if ( eFilter == GamescopeUpscaleFilter::CLEARSCALE && !ClearScaleSupportsInput( eColorspace, bYcbcr, bHasAlpha ) )
+        return bYcbcr ? GamescopeUpscaleFilter::LINEAR : GamescopeUpscaleFilter::FSR;
     if ( eFilter != GamescopeUpscaleFilter::SGSR || SgsrSupportsInput( eColorspace, bYcbcr ) )
         return eFilter;
     return bYcbcr ? GamescopeUpscaleFilter::LINEAR : GamescopeUpscaleFilter::FSR;
@@ -118,6 +137,7 @@ inline std::optional<GamescopeUpscaleFilter> ParseUpscaleFilter( std::string_vie
         { "nis",     GamescopeUpscaleFilter::NIS },
         { "pixel",   GamescopeUpscaleFilter::PIXEL },
         { "sgsr",    GamescopeUpscaleFilter::SGSR },
+        { "clearscale", GamescopeUpscaleFilter::CLEARSCALE },
     };
     for ( const auto &[svFilterName, eFilter] : k_Filters )
     {

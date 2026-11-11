@@ -290,6 +290,7 @@ struct FrameInfo_t
 	bool useFSRLayer0;
 	bool useNISLayer0;
 	bool useSGSRLayer0;
+	bool useClearScaleLayer0 = false;
 	// Upscale settings for this frame.
 	GamescopeUpscaleFilter eUpscaleFilter = GamescopeUpscaleFilter::LINEAR;
 	GamescopeUpscaleScaler eUpscaleScaler = GamescopeUpscaleScaler::AUTO;
@@ -613,6 +614,12 @@ struct VulkanOutput_t
 	// NIS and FSR
 	gamescope::OwningRc<CVulkanTexture> tmpOutput;
 
+	// ClearScale source feature maps and destination intermediates.
+	std::array<gamescope::OwningRc<CVulkanTexture>, 3> clearScaleFeatures;
+	gamescope::OwningRc<CVulkanTexture> clearScaleColor;
+	gamescope::OwningRc<CVulkanTexture> clearScaleMetadata;
+	gamescope::OwningRc<CVulkanTexture> clearScaleOutput;
+
 	// NIS
 	gamescope::OwningRc<CVulkanTexture> nisScalerImage;
 	gamescope::OwningRc<CVulkanTexture> nisUsmImage;
@@ -630,6 +637,10 @@ enum ShaderType {
 	SHADER_TYPE_NIS_HDR_LINEAR,
 	SHADER_TYPE_RGB_TO_NV12,
 	SHADER_TYPE_SGSR,
+	SHADER_TYPE_CLEARSCALE_ANALYSIS,
+	SHADER_TYPE_CLEARSCALE_METADATA,
+	SHADER_TYPE_CLEARSCALE_HDA,
+	SHADER_TYPE_CLEARSCALE_CASP,
 
 	SHADER_TYPE_COUNT
 };
@@ -1014,6 +1025,9 @@ public:
 	void setSamplerNearest(uint32_t slot, bool nearest);
 	void setSamplerUnnormalized(uint32_t slot, bool unnormalized);
 	void bindTarget(gamescope::Rc<CVulkanTexture> target);
+	// Bind additional storage outputs for multi-target compute passes. Slot 0
+	// remains the bindTarget() image; valid extra slots are 1..VKR_TARGET_SLOTS-1.
+	void bindStorageTarget(uint32_t slot, gamescope::Rc<CVulkanTexture> target);
 	void clearState();
 	template<class PushData, class... Args>
 	void uploadConstants(Args&&... args);
@@ -1061,7 +1075,7 @@ private:
 	std::array<CVulkanTexture *, VKR_SAMPLER_SLOTS> m_boundTextures;
 	std::bitset<VKR_SAMPLER_SLOTS> m_useSrgb;
 	std::array<SamplerState, VKR_SAMPLER_SLOTS> m_samplerState;
-	CVulkanTexture *m_target;
+	std::array<CVulkanTexture *, VKR_TARGET_SLOTS> m_targets;
 
 	std::array<CVulkanTexture *, VKR_LUT3D_COUNT> m_shaperLut;
 	std::array<CVulkanTexture *, VKR_LUT3D_COUNT> m_lut3D;

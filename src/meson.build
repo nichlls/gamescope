@@ -74,6 +74,10 @@ shader_src = [
   'shaders/cs_nis_hdr_linear_fp16.comp',
   'shaders/cs_rgb_to_nv12.comp',
   'shaders/cs_sgsr.comp',
+  'shaders/cs_clearscale_analysis.comp',
+  'shaders/cs_clearscale_metadata.comp',
+  'shaders/cs_clearscale_hda.comp',
+  'shaders/cs_clearscale_casp.comp',
 ]
 
 spirv_shaders = glsl_generator.process(shader_src)

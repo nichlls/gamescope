@@ -207,6 +207,7 @@ struct xwayland_ctx_t final : public gamescope::IWaitable
 
 		Atom gamescopeNewScalingFilter;
 		Atom gamescopeNewScalingScaler;
+		Atom gamescopeUpscalerCapabilities;
 
 		Atom gamescopeDisplayEdidPath;
 

@@ -4,6 +4,7 @@
 
 TEST_CASE("SGSR keeps the wire value Steam writes", "[upscale]") {
 	REQUIRE( uint32_t( GamescopeUpscaleFilter::SGSR ) == 5 );
+	REQUIRE( uint32_t( GamescopeUpscaleFilter::CLEARSCALE ) == 6 );
 }
 
 TEST_CASE("SGSR only takes SDR RGB input", "[upscale]") {
@@ -19,6 +20,18 @@ TEST_CASE("SGSR falls back on input it cannot read", "[upscale]") {
 	REQUIRE( ResolveUpscaleFilter( GamescopeUpscaleFilter::SGSR, GAMESCOPE_APP_TEXTURE_COLORSPACE_HDR10_PQ, false ) == GamescopeUpscaleFilter::FSR );
 	REQUIRE( ResolveUpscaleFilter( GamescopeUpscaleFilter::SGSR, GAMESCOPE_APP_TEXTURE_COLORSPACE_SRGB, true ) == GamescopeUpscaleFilter::LINEAR );
 	REQUIRE( ResolveUpscaleFilter( GamescopeUpscaleFilter::NIS, GAMESCOPE_APP_TEXTURE_COLORSPACE_HDR10_PQ, false ) == GamescopeUpscaleFilter::NIS );
+	REQUIRE( ResolveUpscaleFilter( GamescopeUpscaleFilter::CLEARSCALE, GAMESCOPE_APP_TEXTURE_COLORSPACE_SRGB, false ) == GamescopeUpscaleFilter::CLEARSCALE );
+	REQUIRE( ResolveUpscaleFilter( GamescopeUpscaleFilter::CLEARSCALE, GAMESCOPE_APP_TEXTURE_COLORSPACE_SRGB, false, true ) == GamescopeUpscaleFilter::FSR );
+	REQUIRE( ResolveUpscaleFilter( GamescopeUpscaleFilter::CLEARSCALE, GAMESCOPE_APP_TEXTURE_COLORSPACE_LINEAR, false ) == GamescopeUpscaleFilter::FSR );
+	REQUIRE( ResolveUpscaleFilter( GamescopeUpscaleFilter::CLEARSCALE, GAMESCOPE_APP_TEXTURE_COLORSPACE_SRGB, true ) == GamescopeUpscaleFilter::LINEAR );
+}
+
+TEST_CASE("ClearScale only accepts qualified per-axis scale ratios", "[upscale]") {
+	REQUIRE( ClearScaleSupportsScale( 640, 400, 1280, 800 ) );
+	REQUIRE( ClearScaleSupportsScale( 853, 533, 1280, 800 ) );
+	REQUIRE_FALSE( ClearScaleSupportsScale( 1280, 800, 1280, 800 ) );
+	REQUIRE_FALSE( ClearScaleSupportsScale( 640, 400, 1280, 439 ) );
+	REQUIRE_FALSE( ClearScaleSupportsScale( 320, 200, 1280, 800 ) );
 }
 
 TEST_CASE("ParseUpscaleFilter names every filter", "[upscale]") {
@@ -28,6 +41,7 @@ TEST_CASE("ParseUpscaleFilter names every filter", "[upscale]") {
 	REQUIRE( ParseUpscaleFilter( "nis" ) == GamescopeUpscaleFilter::NIS );
 	REQUIRE( ParseUpscaleFilter( "pixel" ) == GamescopeUpscaleFilter::PIXEL );
 	REQUIRE( ParseUpscaleFilter( "sgsr" ) == GamescopeUpscaleFilter::SGSR );
+	REQUIRE( ParseUpscaleFilter( "clearscale" ) == GamescopeUpscaleFilter::CLEARSCALE );
 	REQUIRE_FALSE( ParseUpscaleFilter( "sharp" ).has_value() );
 }
 

@@ -1144,7 +1144,7 @@ static gamescope::ConCommand cc_focus_info( "focus_info", "Dump debug info about
 static std::atomic<int32_t> g_nPendingUpscaleFilter = { -1 };
 static std::atomic<int32_t> g_nPendingUpscaleSharpness = { -1 };
 
-static gamescope::ConCommand cc_scaling_filter( "scaling_filter", "Set the scaling filter (linear, nearest, fsr, nis, pixel, sgsr)",
+static gamescope::ConCommand cc_scaling_filter( "scaling_filter", "Set the scaling filter (linear, nearest, fsr, nis, pixel, sgsr, clearscale)",
 []( std::span<std::string_view> args )
 {
 	if ( args.size() < 2 )
@@ -3379,10 +3379,15 @@ paint_all( global_focus_t *pFocus, bool async, bool bRepeatFrame )
 					paint_window(pFocus, w, w, &frameInfo, pFocus->cursor, PaintWindowFlag::BasePlane | PaintWindowFlag::DrawBorders, 1.0f, fit);
 
 					bool needsScaling = frameInfo.layers.get( 0 ).scale.x < 0.999f && frameInfo.layers.get( 0 ).scale.y < 0.999f;
-					GamescopeUpscaleFilter eLayer0Filter = ResolveUpscaleFilter( frameInfo.eUpscaleFilter, frameInfo.layers.get( 0 ).colorspace, frameInfo.layers.get( 0 ).isYcbcr() );
+					GamescopeUpscaleFilter eLayer0Filter = ResolveUpscaleFilter( frameInfo.eUpscaleFilter, frameInfo.layers.get( 0 ).colorspace, frameInfo.layers.get( 0 ).isYcbcr(), frameInfo.layers.get( 0 ).hasAlpha() );
+					if ( eLayer0Filter == GamescopeUpscaleFilter::CLEARSCALE
+							&& !ClearScaleSupportsScale( frameInfo.layers.get( 0 ).tex->width(), frameInfo.layers.get( 0 ).tex->height(),
+								frameInfo.layers.get( 0 ).integerWidth(), frameInfo.layers.get( 0 ).integerHeight() ) )
+						eLayer0Filter = GamescopeUpscaleFilter::FSR;
 					frameInfo.useFSRLayer0 = eLayer0Filter == GamescopeUpscaleFilter::FSR && needsScaling;
 					frameInfo.useNISLayer0 = eLayer0Filter == GamescopeUpscaleFilter::NIS && needsScaling;
 					frameInfo.useSGSRLayer0 = eLayer0Filter == GamescopeUpscaleFilter::SGSR && needsScaling;
+					frameInfo.useClearScaleLayer0 = eLayer0Filter == GamescopeUpscaleFilter::CLEARSCALE && needsScaling;
 				}
 				if ( pFocus == GetCurrentMouseFocus() )
 					update_touch_scaling( &frameInfo );
@@ -3543,6 +3548,7 @@ paint_all( global_focus_t *pFocus, bool async, bool bRepeatFrame )
 		frameInfo.useFSRLayer0 = false;
 		frameInfo.useNISLayer0 = false;
 		frameInfo.useSGSRLayer0 = false;
+		frameInfo.useClearScaleLayer0 = false;
 	}
 
 	pFocus->eActiveUpscaler = GamescopeUpscaleFilter::LINEAR;
@@ -3552,6 +3558,8 @@ paint_all( global_focus_t *pFocus, bool async, bool bRepeatFrame )
 		pFocus->eActiveUpscaler = GamescopeUpscaleFilter::NIS;
 	else if ( frameInfo.useSGSRLayer0 )
 		pFocus->eActiveUpscaler = GamescopeUpscaleFilter::SGSR;
+	else if ( frameInfo.useClearScaleLayer0 )
+		pFocus->eActiveUpscaler = GamescopeUpscaleFilter::CLEARSCALE;
 	// A full blur draws layer 0 from the blurred image, so its filter never runs.
 	else if ( frameInfo.layers.count() && !frameInfo.layers.get( 0 ).isScreenSize() && frameInfo.blurLayer0 != BLUR_MODE_ALWAYS )
 	{
@@ -7575,7 +7583,7 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
 	{
 		uint32_t uScalingFilter = get_prop( ctx, ctx->root, ctx->atoms.gamescopeNewScalingFilter, 0 );
 
-		if ( uScalingFilter > uint32_t( GamescopeUpscaleFilter::SGSR ) )
+		if ( uScalingFilter > uint32_t( GamescopeUpscaleFilter::CLEARSCALE ) )
 			xwm_log.errorf( "Unknown scaling filter %u, keeping %u", uScalingFilter, uint32_t( g_wantedUpscaleFilter ) );
 		else if ( g_wantedUpscaleFilter != GamescopeUpscaleFilter( uScalingFilter ) )
 		{
@@ -8842,10 +8850,15 @@ void update_wayland_res(const std::shared_ptr<CommitDoneList_t> &doneCommits, st
 		upscaledFrameInfo.eUpscaleScaler = pUpscaleFocus->eUpscaleScaler;
 		upscaledFrameInfo.nUpscaleSharpness = pUpscaleFocus->nUpscaleSharpness;
 		paint_window_commit( newCommit, w, w, &upscaledFrameInfo, nullptr );
-		GamescopeUpscaleFilter eLayer0Filter = ResolveUpscaleFilter( upscaledFrameInfo.eUpscaleFilter, upscaledFrameInfo.layers.get( 0 ).colorspace, upscaledFrameInfo.layers.get( 0 ).isYcbcr() );
+		GamescopeUpscaleFilter eLayer0Filter = ResolveUpscaleFilter( upscaledFrameInfo.eUpscaleFilter, upscaledFrameInfo.layers.get( 0 ).colorspace, upscaledFrameInfo.layers.get( 0 ).isYcbcr(), upscaledFrameInfo.layers.get( 0 ).hasAlpha() );
+		if ( eLayer0Filter == GamescopeUpscaleFilter::CLEARSCALE
+				&& !ClearScaleSupportsScale( upscaledFrameInfo.layers.get( 0 ).tex->width(), upscaledFrameInfo.layers.get( 0 ).tex->height(),
+					upscaledFrameInfo.layers.get( 0 ).integerWidth(), upscaledFrameInfo.layers.get( 0 ).integerHeight() ) )
+			eLayer0Filter = GamescopeUpscaleFilter::FSR;
 		upscaledFrameInfo.useFSRLayer0 = eLayer0Filter == GamescopeUpscaleFilter::FSR;
 		upscaledFrameInfo.useNISLayer0 = eLayer0Filter == GamescopeUpscaleFilter::NIS;
 		upscaledFrameInfo.useSGSRLayer0 = eLayer0Filter == GamescopeUpscaleFilter::SGSR;
+		upscaledFrameInfo.useClearScaleLayer0 = eLayer0Filter == GamescopeUpscaleFilter::CLEARSCALE;
 		globalScaleRatio = flOldGlobalScale;
 		zoomScaleRatio = flOldZoomScale;
 		overscanScaleRatio = flOldOverscanScale;
@@ -9503,6 +9516,14 @@ void init_xwayland_ctx(uint32_t serverId, gamescope_xwayland_server_t *xwayland_
 
 	ctx->atoms.gamescopeNewScalingFilter = XInternAtom( ctx->dpy, "GAMESCOPE_NEW_SCALING_FILTER", false );
 	ctx->atoms.gamescopeNewScalingScaler = XInternAtom( ctx->dpy, "GAMESCOPE_NEW_SCALING_SCALER", false );
+	ctx->atoms.gamescopeUpscalerCapabilities = XInternAtom( ctx->dpy, "GAMESCOPE_UPSCALER_CAPABILITIES", false );
+	// Version 1 capability tuple: [ABI version, filter bitmask, max scale x100].
+	// Bit 6 corresponds to the append-only ClearScale filter ID.
+	const unsigned long upscalerCapabilities[] = { 1, 1u << uint32_t( GamescopeUpscaleFilter::CLEARSCALE ), 200 };
+	XChangeProperty( ctx->dpy, ctx->root, ctx->atoms.gamescopeUpscalerCapabilities,
+		XA_CARDINAL, 32, PropModeReplace,
+		reinterpret_cast<const unsigned char *>( upscalerCapabilities ),
+		std::size( upscalerCapabilities ) );
 
 	ctx->atoms.gamescopeDisplayEdidPath = XInternAtom( ctx->dpy, "GAMESCOPE_DISPLAY_EDID_PATH", false );
 	ctx->atoms.gamescopeXwaylandServerId = XInternAtom( ctx->dpy, "GAMESCOPE_XWAYLAND_SERVER_ID", false );

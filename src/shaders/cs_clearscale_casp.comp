@@ -1,0 +1,11 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#define CLEAR_SCALE_GAMESCOPE 1
+#include "descriptor_set.h"
+#include "../../../../clearscale/shaders/common/params.glsl"
+
+layout(local_size_x=8,local_size_y=8) in;
+#define colorIn s_samplers[0]
+#define metadata s_samplers[1]
+#define colorOut dst
+#include "../../../../clearscale/shaders/common/casp_main.glsl"

@@ -52,6 +52,10 @@
 #include "cs_nis_hdr_linear_fp16.h"
 #include "cs_rgb_to_nv12.h"
 #include "cs_sgsr.h"
+#include "cs_clearscale_analysis.h"
+#include "cs_clearscale_metadata.h"
+#include "cs_clearscale_hda.h"
+#include "cs_clearscale_casp.h"
 
 #define A_CPU
 #include "shaders/ffx_a.h"
@@ -799,7 +803,7 @@ bool CVulkanDevice::createLayouts()
 	for (auto& sampler : ycbcrSamplers)
 		sampler = m_ycbcrSampler;
 
-	std::array<VkDescriptorSetLayoutBinding, 7 > layoutBindings = {
+	std::array<VkDescriptorSetLayoutBinding, 8 > layoutBindings = {
 		VkDescriptorSetLayoutBinding {
 			.binding = 0,
 			.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -841,6 +845,12 @@ bool CVulkanDevice::createLayouts()
 			.binding = 6,
 			.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
 			.descriptorCount = VKR_LUT3D_COUNT,
+			.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+		},
+		VkDescriptorSetLayoutBinding {
+			.binding = 7,
+			.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+			.descriptorCount = 1,
 			.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
 		},
 	};
@@ -929,7 +939,7 @@ bool CVulkanDevice::createPools()
 		},
 		{
 			VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-			uint32_t(m_descriptorSets.size()) * 2,
+			uint32_t(m_descriptorSets.size()) * VKR_TARGET_SLOTS,
 		},
 		{
 			VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -991,6 +1001,10 @@ bool CVulkanDevice::createShaders()
 	}
 	SHADER(RGB_TO_NV12, cs_rgb_to_nv12);
 	SHADER(SGSR, cs_sgsr);
+	SHADER(CLEARSCALE_ANALYSIS, cs_clearscale_analysis);
+	SHADER(CLEARSCALE_METADATA, cs_clearscale_metadata);
+	SHADER(CLEARSCALE_HDA, cs_clearscale_hda);
+	SHADER(CLEARSCALE_CASP, cs_clearscale_casp);
 #undef SHADER
 
 	for (uint32_t i = 0; i < shaderInfos.size(); i++)
@@ -1223,6 +1237,10 @@ void CVulkanDevice::compileAllPipelines(std::stop_token st)
 	SHADER(NIS_HDR_LINEAR, 1, 1, 1);
 	SHADER(RGB_TO_NV12, 1, 1, 1);
 	SHADER(SGSR, 1, 1, 1);
+	SHADER(CLEARSCALE_ANALYSIS, 1, 1, 1);
+	SHADER(CLEARSCALE_METADATA, 1, 1, 1);
+	SHADER(CLEARSCALE_HDA, 1, 1, 1);
+	SHADER(CLEARSCALE_CASP, 1, 1, 1);
 #undef SHADER
 
 	for (auto& info : pipelineInfos) {
@@ -1676,7 +1694,17 @@ void CVulkanCmdBuffer::setSamplerUnnormalized(uint32_t slot, bool unnormalized)
 
 void CVulkanCmdBuffer::bindTarget(gamescope::Rc<CVulkanTexture> target)
 {
-	m_target = target.get();
+	m_targets[0] = target.get();
+	for (uint32_t i = 1; i < VKR_TARGET_SLOTS; i++)
+		m_targets[i] = nullptr;
+	if (target)
+		m_textureRefs.emplace_back(std::move(target));
+}
+
+void CVulkanCmdBuffer::bindStorageTarget(uint32_t slot, gamescope::Rc<CVulkanTexture> target)
+{
+	assert(slot > 0 && slot < VKR_TARGET_SLOTS);
+	m_targets[slot] = target.get();
 	if (target)
 		m_textureRefs.emplace_back(std::move(target));
 }
@@ -1689,7 +1717,8 @@ void CVulkanCmdBuffer::clearState()
 	for (auto& sampler : m_samplerState)
 		sampler = {};
 
-	m_target = nullptr;
+	for (auto& target : m_targets)
+		target = nullptr;
 	m_useSrgb.reset();
 }
 
@@ -1715,13 +1744,15 @@ void CVulkanCmdBuffer::dispatch(uint32_t x, uint32_t y, uint32_t z)
 		if (src)
 			prepareSrcImage(src);
 	}
-	assert(m_target != nullptr);
-	prepareDestImage(m_target);
+	assert(m_targets[0] != nullptr);
+	for (auto *target : m_targets)
+		if (target)
+			prepareDestImage(target);
 	insertBarrier();
 
 	VkDescriptorSet descriptorSet = m_device->descriptorSet( this );
 
-	std::array<VkWriteDescriptorSet, 7> writeDescriptorSets;
+	std::array<VkWriteDescriptorSet, 8> writeDescriptorSets;
 	std::array<VkDescriptorImageInfo, VKR_SAMPLER_SLOTS> imageDescriptors = {};
 	std::array<VkDescriptorImageInfo, VKR_SAMPLER_SLOTS> ycbcrImageDescriptors = {};
 	std::array<VkDescriptorImageInfo, VKR_TARGET_SLOTS> targetDescriptors = {};
@@ -1799,6 +1830,16 @@ void CVulkanCmdBuffer::dispatch(uint32_t x, uint32_t y, uint32_t z)
 		.pImageInfo = lut3DDescriptor.data(),
 	};
 
+	writeDescriptorSets[7] = {
+		.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+		.dstSet = descriptorSet,
+		.dstBinding = 7,
+		.dstArrayElement = 0,
+		.descriptorCount = 1,
+		.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+		.pImageInfo = &targetDescriptors[2],
+	};
+
 	scratchDescriptor.buffer = m_device->m_uploadBuffer;
 	scratchDescriptor.offset = m_renderBufferOffset;
 	scratchDescriptor.range = VK_WHOLE_SIZE;
@@ -1839,19 +1880,24 @@ void CVulkanCmdBuffer::dispatch(uint32_t x, uint32_t y, uint32_t z)
 		lut3DDescriptor[i].imageView = m_lut3D[i] ? m_lut3D[i]->srgbView() : VK_NULL_HANDLE;
 	}
 
-	if (!m_target->isYcbcr())
+	if (!m_targets[0]->isYcbcr())
 	{
-		targetDescriptors[0].imageView = m_target->srgbView();
+		targetDescriptors[0].imageView = m_targets[0]->srgbView();
 		targetDescriptors[0].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+		targetDescriptors[1].imageView = m_targets[1] ? m_targets[1]->srgbView() : m_targets[0]->srgbView();
+		targetDescriptors[1].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 	}
 	else
 	{
-		targetDescriptors[0].imageView = m_target->lumaView();
+		targetDescriptors[0].imageView = m_targets[0]->lumaView();
 		targetDescriptors[0].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
-		targetDescriptors[1].imageView = m_target->chromaView();
+		targetDescriptors[1].imageView = m_targets[0]->chromaView();
 		targetDescriptors[1].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 	}
+	CVulkanTexture *extraTarget = m_targets[2] ? m_targets[2] : m_targets[0];
+	targetDescriptors[2].imageView = extraTarget->srgbView();
+	targetDescriptors[2].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
 	m_device->vk.UpdateDescriptorSets(m_device->device(), writeDescriptorSets.size(), writeDescriptorSets.data(), 0, nullptr);
 
@@ -1859,7 +1905,9 @@ void CVulkanCmdBuffer::dispatch(uint32_t x, uint32_t y, uint32_t z)
 
 	m_device->vk.CmdDispatch(m_cmdBuffer, x, y, z);
 
-	markDirty(m_target);
+	for (auto *target : m_targets)
+		if (target)
+			markDirty(target);
 }
 
 void CVulkanCmdBuffer::copyImage(gamescope::Rc<CVulkanTexture> src, gamescope::Rc<CVulkanTexture> dst)
@@ -3685,6 +3733,64 @@ static void update_tmp_images( uint32_t width, uint32_t height, uint32_t uFormat
 	}
 }
 
+struct ClearScaleUniform_t
+{
+	std::array<uint32_t, 4> srcRect;
+	std::array<uint32_t, 4> dstRect;
+	std::array<float, 4> scale;
+	std::array<float, 4> controls;
+	std::array<float, 4> controls2;
+	std::array<uint32_t, 4> flags;
+	std::array<uint32_t, 4> extents;
+	std::array<uint32_t, 4> versions;
+	std::array<float, 4> thresholds0;
+	std::array<float, 4> thresholds1;
+	std::array<float, 4> kernel;
+
+	ClearScaleUniform_t( uint32_t srcWidth, uint32_t srcHeight, uint32_t dstWidth, uint32_t dstHeight )
+		: srcRect{ 0, 0, srcWidth, srcHeight }
+		, dstRect{ 0, 0, dstWidth, dstHeight }
+		, scale{ 1.0f / srcWidth, 1.0f / srcHeight, float(dstWidth) / srcWidth, float(dstHeight) / srcHeight }
+		, controls{ 0.10f, 0.85f, 0.30f, 0.90f }
+		, controls2{ 0.50f, 1e-8f, 0.70f, 0.0f }
+		, flags{ 0, 0, 0, 0 }
+		, extents{ srcWidth, srcHeight, dstWidth, dstHeight }
+		, versions{ 1, 1, 0, 0 }
+		, thresholds0{ 4.0f/255.0f, 24.0f/255.0f, 0.35f, 0.80f }
+		, thresholds1{ 2.0f/255.0f, 12.0f/255.0f, 1.0f/255.0f, 4.0f/255.0f }
+		, kernel{ 1.0f, 0.05f, 0.10f, 0.50f }
+	{
+	}
+};
+static_assert( sizeof(ClearScaleUniform_t) == 176 );
+static_assert( offsetof(ClearScaleUniform_t, thresholds0) == 128 );
+
+static bool ensure_clearscale_texture( gamescope::OwningRc<CVulkanTexture>& image, uint32_t width, uint32_t height, uint32_t format )
+{
+	if ( image != nullptr && image->width() == width && image->height() == height && image->drmFormat() == format )
+		return true;
+
+	CVulkanTexture::createFlags createFlags;
+	createFlags.bSampled = true;
+	createFlags.bStorage = true;
+	gamescope::OwningRc<CVulkanTexture> replacement = new CVulkanTexture();
+	if ( !replacement->BInit( width, height, 1u, format, createFlags, nullptr ) )
+		return false;
+	image = std::move( replacement );
+	return true;
+}
+
+static bool update_clearscale_images( uint32_t srcWidth, uint32_t srcHeight, uint32_t dstWidth, uint32_t dstHeight )
+{
+	for ( auto& feature : g_output.clearScaleFeatures )
+		if ( !ensure_clearscale_texture( feature, srcWidth, srcHeight, DRM_FORMAT_ABGR32323232F ) )
+			return false;
+
+	return ensure_clearscale_texture( g_output.clearScaleColor, dstWidth, dstHeight, DRM_FORMAT_ABGR16161616F )
+		&& ensure_clearscale_texture( g_output.clearScaleMetadata, dstWidth, dstHeight, DRM_FORMAT_ABGR16161616F )
+		&& ensure_clearscale_texture( g_output.clearScaleOutput, dstWidth, dstHeight, DRM_FORMAT_ABGR16161616F );
+}
+
 
 static bool init_nis_data()
 {
@@ -4307,6 +4413,7 @@ namespace
 			case GamescopeUpscaleFilter::NIS:     return "nis";
 			case GamescopeUpscaleFilter::PIXEL:   return "pixel";
 			case GamescopeUpscaleFilter::SGSR:    return "sgsr";
+			case GamescopeUpscaleFilter::CLEARSCALE: return "clearscale";
 			default:                              return "view";
 		}
 	}
@@ -4500,6 +4607,21 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
 	for (uint32_t i = 0; i < EOTF_Count; i++)
 		cmdBuffer->bindColorMgmtLuts(i, frameInfo->shaperLut[i], frameInfo->lut3D[i]);
 
+	// Allocate reusable ClearScale intermediates before selecting its path. If a
+	// format or allocation is unavailable, the frame follows the established FSR
+	// path instead of submitting shaders with incomplete descriptors.
+	if ( frameInfo->useClearScaleLayer0 )
+	{
+		const auto &layer = frameInfo->layers.get( 0 );
+		if ( !update_clearscale_images( layer.tex->width(), layer.tex->height(),
+										layer.integerWidth(), layer.integerHeight() ) )
+		{
+			vk_log.errorf( "ClearScale intermediate allocation failed; falling back to FSR" );
+			frameInfo->useClearScaleLayer0 = false;
+			frameInfo->useFSRLayer0 = true;
+		}
+	}
+
 	if ( frameInfo->useFSRLayer0 || frameInfo->useSGSRLayer0 )
 	{
 		uint32_t inputX = frameInfo->layers.get( 0 ).tex->width();
@@ -4542,6 +4664,88 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
 		cmdBuffer->uploadConstants<RcasPushData_t>(frameInfo, frameInfo->nUpscaleSharpness / 10.0f, uOutputRotation);
 
 		cmdBuffer->dispatch(div_roundup(currentOutputWidth, pixelsPerGroup), div_roundup(currentOutputHeight, pixelsPerGroup));
+	}
+	else if ( frameInfo->useClearScaleLayer0 )
+	{
+		const auto &layer = frameInfo->layers.get( 0 );
+		const uint32_t inputX = layer.tex->width();
+		const uint32_t inputY = layer.tex->height();
+		const uint32_t tempX = layer.integerWidth();
+		const uint32_t tempY = layer.integerHeight();
+		const ClearScaleUniform_t constants( inputX, inputY, tempX, tempY );
+		const uint32_t pixelsPerGroup = 8;
+
+		// Pass 1: source-space feature analysis. The three RGBA32F feature maps
+		// store tensor/contrast, edge/texture confidence, and noise/flatness data.
+		cmdBuffer->bindPipeline( g_device.pipeline( SHADER_TYPE_CLEARSCALE_ANALYSIS, 1, 0, 0, 0u, EOTF_Count ) );
+		cmdBuffer->bindTexture( 0, layer.tex );
+		// Gamescope's sRGB-view flag selects the raw encoded view. HDA/CASP
+		// thresholds and kernels operate in this perceptual SDR domain.
+		cmdBuffer->setTextureSrgb( 0, true );
+		cmdBuffer->setSamplerUnnormalized( 0, false );
+		cmdBuffer->setSamplerNearest( 0, false );
+		cmdBuffer->bindTarget( g_output.clearScaleFeatures[0] );
+		cmdBuffer->bindStorageTarget( 1, g_output.clearScaleFeatures[1] );
+		cmdBuffer->bindStorageTarget( 2, g_output.clearScaleFeatures[2] );
+		cmdBuffer->uploadConstants<ClearScaleUniform_t>( constants );
+		cmdBuffer->dispatch( div_roundup( inputX, pixelsPerGroup ), div_roundup( inputY, pixelsPerGroup ) );
+
+		if ( oTimingSlot )
+			CompositeTimingMid( cmdBuffer.get(), *oTimingSlot );
+
+		// Pass 2: HDA reconstructs the layer at its compositor-space size and
+		// writes CASP's protection and sharpening allowance alongside the color.
+		cmdBuffer->bindPipeline( g_device.pipeline( SHADER_TYPE_CLEARSCALE_HDA, 1, 0, 0, 0u, EOTF_Count ) );
+		cmdBuffer->bindTexture( 0, layer.tex );
+		cmdBuffer->bindTexture( 1, vulkan_get_hacky_blank_texture() ); // Mask disabled by flags.
+		cmdBuffer->bindTexture( 2, g_output.clearScaleFeatures[0] );
+		cmdBuffer->bindTexture( 3, g_output.clearScaleFeatures[1] );
+		cmdBuffer->bindTexture( 4, g_output.clearScaleFeatures[2] );
+		for ( uint32_t i = 0; i < 5; i++ )
+		{
+			cmdBuffer->setTextureSrgb( i, i == 0 );
+			cmdBuffer->setSamplerUnnormalized( i, false );
+			cmdBuffer->setSamplerNearest( i, false );
+		}
+		cmdBuffer->bindTarget( g_output.clearScaleColor );
+		cmdBuffer->bindStorageTarget( 1, g_output.clearScaleMetadata );
+		cmdBuffer->uploadConstants<ClearScaleUniform_t>( constants );
+		cmdBuffer->dispatch( div_roundup( tempX, pixelsPerGroup ), div_roundup( tempY, pixelsPerGroup ) );
+
+		// Pass 3: CASP sharpens only unprotected detail, with the per-output
+		// allowance and local extrema limiting halos. The user setting follows
+		// the same 0..10 scale used by Gamescope's existing FSR sharpness control.
+		cmdBuffer->bindPipeline( g_device.pipeline( SHADER_TYPE_CLEARSCALE_CASP, 1, 0, 0, 0u, EOTF_Count ) );
+		cmdBuffer->bindTexture( 0, g_output.clearScaleColor );
+		cmdBuffer->bindTexture( 1, g_output.clearScaleMetadata );
+		cmdBuffer->setTextureSrgb( 0, false );
+		cmdBuffer->setTextureSrgb( 1, false );
+		cmdBuffer->setSamplerUnnormalized( 0, false );
+		cmdBuffer->setSamplerUnnormalized( 1, false );
+		cmdBuffer->setSamplerNearest( 0, false );
+		cmdBuffer->setSamplerNearest( 1, false );
+		cmdBuffer->bindTarget( g_output.clearScaleOutput );
+		ClearScaleUniform_t sharpenConstants = constants;
+		// Gamescope uses 0 for maximum and 20 for minimum sharpness.
+		sharpenConstants.controls[0] = float( 20 - std::clamp( frameInfo->nUpscaleSharpness, 0, 20 ) ) / 200.0f;
+		cmdBuffer->uploadConstants<ClearScaleUniform_t>( sharpenConstants );
+		cmdBuffer->dispatch( div_roundup( tempX, pixelsPerGroup ), div_roundup( tempY, pixelsPerGroup ) );
+
+		// Run the ordinary compositor after reconstruction so popups, overlays,
+		// transforms, color management, and output rotation retain Gamescope's
+		// existing behavior. ClearScale's intermediate is linear FP16.
+		FrameInfo_t clearScaleFrameInfo = *frameInfo;
+		clearScaleFrameInfo.layers.get( 0 ).tex = g_output.clearScaleOutput;
+		clearScaleFrameInfo.layers.get( 0 ).scale = { 1.0f, 1.0f };
+		clearScaleFrameInfo.layers.get( 0 ).colorspace = GAMESCOPE_APP_TEXTURE_COLORSPACE_LINEAR;
+		clearScaleFrameInfo.layers.get( 0 ).filter = GamescopeUpscaleFilter::LINEAR;
+		cmdBuffer->bindPipeline( g_device.pipeline( SHADER_TYPE_BLIT, clearScaleFrameInfo.layers.count(),
+										clearScaleFrameInfo.ycbcrMask(), 0u,
+										clearScaleFrameInfo.colorspaceMask(), outputTF ) );
+		bind_all_layers( cmdBuffer.get(), &clearScaleFrameInfo );
+		cmdBuffer->bindTarget( compositeImage );
+		cmdBuffer->uploadConstants<BlitPushData_t>( &clearScaleFrameInfo, uOutputRotation );
+		cmdBuffer->dispatch( div_roundup( currentOutputWidth, pixelsPerGroup ), div_roundup( currentOutputHeight, pixelsPerGroup ) );
 	}
 	else if ( frameInfo->useNISLayer0 )
 	{
@@ -4702,6 +4906,8 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
 		// Label the pass that ran, including HDR fallback and cached frames.
 		if ( frameInfo->useSGSRLayer0 )
 			eFilter = GamescopeUpscaleFilter::SGSR;
+		else if ( frameInfo->useClearScaleLayer0 )
+			eFilter = GamescopeUpscaleFilter::CLEARSCALE;
 		else if ( frameInfo->useFSRLayer0 )
 			eFilter = GamescopeUpscaleFilter::FSR;
 		else if ( frameInfo->useNISLayer0 )

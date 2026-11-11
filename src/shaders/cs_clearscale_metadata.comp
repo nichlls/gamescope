@@ -1,0 +1,12 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#define CLEAR_SCALE_GAMESCOPE 1
+#include "descriptor_set.h"
+#include "../../../../clearscale/shaders/common/params.glsl"
+
+layout(local_size_x=8,local_size_y=8) in;
+#define f1 s_samplers[0]
+#define f2 s_samplers[1]
+#define maskImage s_samplers[2]
+#define metadataOut dst
+#include "../../../../clearscale/shaders/common/metadata_resample_main.glsl"
